@@ -1,0 +1,294 @@
+name: Build APK
+
+on:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.10.2'
+
+      - name: Montar projeto Android
+        run: |
+          set -e
+          test -f index.html || { echo "ERRO: envie o arquivo index.html para a raiz do repositorio"; exit 1; }
+          mkdir -p app/src/main/assets app/src/main/java/com/jotaphone/app
+          cp index.html app/src/main/assets/index.html
+
+          cat > settings.gradle <<'EOF'
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+          dependencyResolutionManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+          rootProject.name = 'JotaPhone'
+          include ':app'
+          EOF
+
+          cat > build.gradle <<'EOF'
+          plugins {
+              id 'com.android.application' version '8.7.3' apply false
+              id 'org.jetbrains.kotlin.android' version '1.9.25' apply false
+          }
+          EOF
+
+          cat > gradle.properties <<'EOF'
+          org.gradle.jvmargs=-Xmx2g
+          android.useAndroidX=true
+          EOF
+
+          cat > app/build.gradle <<'EOF'
+          plugins {
+              id 'com.android.application'
+              id 'org.jetbrains.kotlin.android'
+          }
+          android {
+              namespace 'com.jotaphone.app'
+              compileSdk 34
+              defaultConfig {
+                  applicationId 'com.jotaphone.app'
+                  minSdk 24
+                  targetSdk 34
+                  versionCode 1
+                  versionName '1.2'
+              }
+              compileOptions {
+                  sourceCompatibility JavaVersion.VERSION_17
+                  targetCompatibility JavaVersion.VERSION_17
+              }
+              kotlinOptions {
+                  jvmTarget = '17'
+              }
+          }
+          dependencies {
+              implementation 'org.java-websocket:Java-WebSocket:1.5.7'
+          }
+          EOF
+
+          cat > app/src/main/AndroidManifest.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <uses-permission android:name="android.permission.INTERNET" />
+              <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+              <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+              <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
+              <uses-permission android:name="android.permission.VIBRATE" />
+              <application
+                  android:label="JotaPhone"
+                  android:allowBackup="false"
+                  android:usesCleartextTraffic="true"
+                  android:theme="@android:style/Theme.Material.Light.NoActionBar">
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true"
+                      android:screenOrientation="portrait"
+                      android:windowSoftInputMode="adjustResize"
+                      android:configChanges="orientation|screenSize|keyboardHidden|uiMode">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+              </application>
+          </manifest>
+          EOF
+
+          cat > app/src/main/java/com/jotaphone/app/MainActivity.kt <<'EOF'
+          package com.jotaphone.app
+
+          import android.app.Activity
+          import android.content.Context
+          import android.net.wifi.WifiManager
+          import android.os.Bundle
+          import android.view.WindowManager
+          import android.webkit.JavascriptInterface
+          import android.webkit.WebView
+          import org.java_websocket.WebSocket
+          import org.java_websocket.handshake.ClientHandshake
+          import org.java_websocket.server.WebSocketServer
+          import org.json.JSONObject
+          import java.net.DatagramPacket
+          import java.net.DatagramSocket
+          import java.net.Inet4Address
+          import java.net.InetAddress
+          import java.net.InetSocketAddress
+          import java.net.NetworkInterface
+          import java.net.SocketAddress
+          import java.util.Collections
+
+          // Ponte entre o jogo (JavaScript) e a rede local:
+          // - relay WebSocket (porta 8765): o celular do host repassa as mensagens entre todos
+          // - UDP broadcast (porta 41414): o host anuncia a sala e os outros a encontram
+          class Lan(private val a: Activity, private val w: WebView) {
+              private var srv: WebSocketServer? = null
+              private var udp: DatagramSocket? = null
+              private var lock: WifiManager.MulticastLock? = null
+              @Volatile private var lst = false
+
+              @JavascriptInterface
+              fun startRelay(): String {
+                  if (srv != null) return "ok"
+                  return try {
+                      val s = object : WebSocketServer(InetSocketAddress(8765)) {
+                          override fun onOpen(c: WebSocket, h: ClientHandshake) {}
+                          override fun onClose(c: WebSocket, code: Int, reason: String?, remote: Boolean) {}
+                          override fun onMessage(c: WebSocket, m: String) {
+                              for (x in connections) {
+                                  if (x !== c && x.isOpen) {
+                                      try { x.send(m) } catch (e: Exception) {}
+                                  }
+                              }
+                          }
+                          override fun onError(c: WebSocket?, e: Exception?) {}
+                          override fun onStart() {}
+                      }
+                      s.isReuseAddr = true
+                      s.start()
+                      srv = s
+                      a.runOnUiThread { a.window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON) }
+                      "ok"
+                  } catch (e: Exception) {
+                      e.toString()
+                  }
+              }
+
+              @JavascriptInterface
+              fun stopRelay() {
+                  try { srv?.stop(200) } catch (e: Exception) {}
+                  srv = null
+                  a.runOnUiThread { a.window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON) }
+              }
+
+              @JavascriptInterface
+              fun ip(): String = try {
+                  Collections.list(NetworkInterface.getNetworkInterfaces())
+                      .filter { it.isUp && !it.isLoopback && (it.name.startsWith("wlan") || it.name.startsWith("ap") || it.name.startsWith("swlan") || it.name.startsWith("eth")) }
+                      .flatMap { Collections.list(it.inetAddresses) }
+                      .filterIsInstance<Inet4Address>()
+                      .firstOrNull()?.hostAddress ?: "?"
+              } catch (e: Exception) {
+                  "?"
+              }
+
+              @JavascriptInterface
+              fun ad(json: String) {
+                  Thread {
+                      try {
+                          val d = json.toByteArray()
+                          DatagramSocket().use { s ->
+                              s.broadcast = true
+                              val t = ArrayList<InetAddress>()
+                              t.add(InetAddress.getByName("255.255.255.255"))
+                              for (n in Collections.list(NetworkInterface.getNetworkInterfaces())) {
+                                  if (!n.isUp || n.isLoopback) continue
+                                  for (i in n.interfaceAddresses) {
+                                      val b = i.broadcast
+                                      if (b != null) t.add(b)
+                                  }
+                              }
+                              for (x in t) {
+                                  try { s.send(DatagramPacket(d, d.size, x, 41414)) } catch (e: Exception) {}
+                              }
+                          }
+                      } catch (e: Exception) {}
+                  }.start()
+              }
+
+              @JavascriptInterface
+              fun listen() {
+                  if (lst) return
+                  lst = true
+                  try {
+                      val wm = a.applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
+                      val l = wm.createMulticastLock("jotaphone")
+                      l.setReferenceCounted(false)
+                      l.acquire()
+                      lock = l
+                  } catch (e: Exception) {}
+                  Thread {
+                      try {
+                          val s = DatagramSocket(null as SocketAddress?)
+                          s.reuseAddress = true
+                          s.bind(InetSocketAddress(41414))
+                          udp = s
+                          val buf = ByteArray(4096)
+                          while (lst) {
+                              val p = DatagramPacket(buf, buf.size)
+                              s.receive(p)
+                              val txt = String(p.data, 0, p.length)
+                              val js = "window.onLan&&window.onLan(" + JSONObject.quote(p.address.hostAddress) + "," + JSONObject.quote(txt) + ")"
+                              a.runOnUiThread { w.evaluateJavascript(js, null) }
+                          }
+                      } catch (e: Exception) {
+                          lst = false
+                      }
+                  }.start()
+              }
+
+              fun shutdown() {
+                  lst = false
+                  try { udp?.close() } catch (e: Exception) {}
+                  stopRelay()
+                  try { lock?.release() } catch (e: Exception) {}
+              }
+          }
+
+          class MainActivity : Activity() {
+              private lateinit var web: WebView
+              private lateinit var lan: Lan
+
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  super.onCreate(savedInstanceState)
+                  web = WebView(this)
+                  setContentView(web)
+                  web.settings.javaScriptEnabled = true
+                  web.settings.domStorageEnabled = true
+                  lan = Lan(this, web)
+                  web.addJavascriptInterface(lan, "JotaLan")
+                  web.loadUrl("file:///android_asset/index.html")
+              }
+
+              override fun onDestroy() {
+                  lan.shutdown()
+                  super.onDestroy()
+              }
+          }
+          EOF
+
+      - name: Compilar APK
+        run: gradle assembleDebug --no-daemon --stacktrace
+
+      - name: Guardar APK (aba Actions)
+        uses: actions/upload-artifact@v4
+        with:
+          name: JotaPhone-apk
+          path: app/build/outputs/apk/debug/app-debug.apk
+
+      - name: Publicar APK em Releases
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: apk-${{ github.run_number }}
+          name: JotaPhone APK ${{ github.run_number }}
+          files: app/build/outputs/apk/debug/app-debug.apk
