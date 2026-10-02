@@ -1,0 +1,25 @@
+JotaPhone - atualização v1.3
+
+Arquivos para a RAIZ do repositório:
+- index.html
+- firebase-config.js
+- player.js
+- online.js
+- jotaphone-icon.png
+
+Arquivo de workflow:
+- coloque build.yml em: .github/workflows/build.yml
+
+O que esta atualização adiciona:
+- botão JOGAR LOCAL
+- botão JOGAR ONLINE
+- modo local preservado
+- modo online com Firebase Realtime Database
+- ID permanente do jogador
+- mudança de nome sem mudar o ID
+- 3 novos avatares sem apagar os antigos
+- logo do JotaPhone como ícone do APK
+- versão do APK 1.3
+
+IMPORTANTE:
+O Firebase ainda está em modo de teste. Antes de divulgar o jogo publicamente, troque as regras do Realtime Database por regras seguras.
